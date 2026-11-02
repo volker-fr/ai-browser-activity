@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         OpenAI browser activity overlay
-// @namespace    local.openai.browser-activity
-// @version      1.1.1
+// @name         AI - browser activity
+// @namespace    local.ai-harness.browser-activity
+// @version      1.3.1
 // @description  Shows local assistant updates and page activity without sending page content anywhere.
 // @match        https://*/*
 // @match        http://*/*
@@ -19,8 +19,14 @@
 (function () {
   'use strict';
   const feed = 'http://127.0.0.1:17391/status';
-  const defaults = { corner: 'bottom-right', compact: false, activity: true, onlyUpdated: false };
+  const defaults = { corner: 'bottom-right', compact: true, activity: false, onlyUpdated: false };
   let prefs = { ...defaults, ...GM_getValue('preferences', {}) };
+  // Apply the assistant-focused layout once; later user choices remain persistent.
+  if (!GM_getValue('assistantLayout', false)) {
+    prefs = { ...prefs, corner: defaults.corner, compact: defaults.compact, activity: defaults.activity };
+    GM_setValue('preferences', prefs);
+    GM_setValue('assistantLayout', true);
+  }
   let siteHidden = GM_getValue('hidden:' + location.origin, false);
   const host = document.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;display:block';
@@ -35,25 +41,28 @@
     section.folded .body,section.compact .details{display:none}section.folded header{border-bottom:0}
     .options{border-top:1px solid #42655d;margin-top:10px;padding-top:10px}.options[hidden]{display:none}
     label{display:block;margin:8px 0}select{max-width:100%}input{vertical-align:middle}.options small{display:block}
+    .agent-update + .agent-update{margin-top:12px;padding-top:10px;border-top:1px solid #42655d}.agent-label{display:block;color:#b1cbc2;overflow-wrap:anywhere}
     a{color:#baf3dc}time{display:block;font-size:11px;color:#b1cbc2}
-  </style><section aria-label="OpenAI activity overlay"><header><strong>OpenAI · browser activity</strong><button class="settings-toggle" type="button" aria-label="Overlay options" aria-expanded="false">Options</button><button class="fold-toggle" type="button" aria-label="Minimize overlay">−</button></header>
-  <div class="body"><div class="label">Assistant update</div><p class="update">Connecting to local feed…</p><time></time>
+  </style><section aria-label="AI browser activity overlay"><header><strong>AI - browser activity</strong><button class="settings-toggle" type="button" aria-label="Overlay options" aria-expanded="false">Options</button><button class="fold-toggle" type="button" aria-label="Minimize overlay">−</button></header>
+  <div class="body"><div class="update">Connecting to local feed…</div>
   <div class="details"><div class="label">This page</div><p class="page"></p><small class="address"></small>
   <div class="activity-block"><div class="label">Page activity</div><p class="activity">Page opened</p></div>
-  <small class="connection"></small></div><a href="http://127.0.0.1:17391/" target="_blank" rel="noopener noreferrer">Local update panel</a>
+  </div><small class="connection" hidden></small>
   <div class="options" hidden><small>Options apply to all sites and tabs.</small>
+  <a href="http://127.0.0.1:17391/" target="_blank" rel="noopener noreferrer">Local update panel</a>
   <label>Position <select class="corner"><option value="bottom-right">Bottom right</option><option value="bottom-left">Bottom left</option><option value="top-right">Top right</option><option value="top-left">Top left</option></select></label>
-  <label><input class="compact" type="checkbox"> Compact view</label>
+  <label><input class="compact-option" type="checkbox"> Compact view</label>
   <label><input class="show-activity" type="checkbox"> Show page activity</label>
   <label><input class="only-updated" type="checkbox"> Only show pages with an assistant update</label>
   <button class="hide-site" type="button">Hide on this site</button>
   <small>Restore using Violentmonkey's “Show overlay on this site” menu command.</small>
-  <small>v1.1.1 · local feed only</small></div></div></section>`;
+  <small>v1.3.1 · local feed only</small></div></div></section>`;
   document.documentElement.append(host);
   const $ = selector => root.querySelector(selector);
   const section = $('section');
   const toggle = $('.fold-toggle');
   toggle.addEventListener('click', () => {
+    closeOptions();
     const folded = section.classList.toggle('folded');
     toggle.textContent = folded ? '+' : '−';
     toggle.setAttribute('aria-label', folded ? 'Expand overlay' : 'Minimize overlay');
@@ -73,21 +82,41 @@
     section.classList.toggle('compact', prefs.compact);
     $('.activity-block').hidden = !prefs.activity;
     $('.corner').value = prefs.corner;
-    $('.compact').checked = prefs.compact;
+    $('.compact-option').checked = prefs.compact;
     $('.show-activity').checked = prefs.activity;
     $('.only-updated').checked = prefs.onlyUpdated;
-    const entry = cache?.pages?.[key] || cache?.global;
-    host.style.display = siteHidden || (prefs.onlyUpdated && !entry) ? 'none' : 'block';
+    host.style.display = siteHidden || (prefs.onlyUpdated && !matchingUpdates().length) ? 'none' : 'block';
   }
+  let optionsTimer;
+  function closeOptions() {
+    clearTimeout(optionsTimer);
+    $('.options').hidden = true;
+    $('.settings-toggle').setAttribute('aria-expanded', 'false');
+  }
+  function keepOptionsOpen() {
+    clearTimeout(optionsTimer);
+    if (!$('.options').hidden) optionsTimer = setTimeout(closeOptions, 10000);
+  }
+  for (const event of ['pointerdown', 'keydown', 'input', 'change']) {
+    root.addEventListener(event, keepOptionsOpen);
+  }
+  document.addEventListener('pointerdown', event => {
+    if (!event.composedPath().includes(host)) closeOptions();
+  }, true);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeOptions();
+  }, true);
   $('.settings-toggle').addEventListener('click', () => {
-    $('.options').hidden = !$('.options').hidden;
-    $('.settings-toggle').setAttribute('aria-expanded', String(!$('.options').hidden));
+    if (!$('.options').hidden) { closeOptions(); return; }
+    $('.options').hidden = false;
+    $('.settings-toggle').setAttribute('aria-expanded', 'true');
+    keepOptionsOpen();
     section.classList.remove('folded');
     toggle.textContent = '−';
     toggle.setAttribute('aria-label', 'Minimize overlay');
   });
   for (const [selector, property, checkbox] of [
-    ['.corner', 'corner', false], ['.compact', 'compact', true],
+    ['.corner', 'corner', false], ['.compact-option', 'compact', true],
     ['.show-activity', 'activity', true], ['.only-updated', 'onlyUpdated', true]
   ]) {
     $(selector).addEventListener('change', event => {
@@ -116,16 +145,39 @@
       paintUpdate();
     }
   }
+  function matchingUpdates() {
+    return Object.values(cache?.channels || {}).flatMap(channel => {
+      const entry = channel?.pages?.[key] || channel?.global;
+      return typeof channel?.agent === 'string' && typeof channel?.session === 'string'
+        && typeof entry?.message === 'string' ? [{ channel, entry }] : [];
+    }).sort((a, b) => a.channel.agent.localeCompare(b.channel.agent)
+      || a.channel.session.localeCompare(b.channel.session));
+  }
   function paintUpdate() {
-    const entry = cache?.pages?.[key] || cache?.global;
-    $('.update').textContent = entry?.message || (connected ? 'No assistant update for this page yet.' : 'Local feed offline. Start server.py.');
-    if (entry?.updated) {
-      const date = new Date(entry.updated);
-      $('time').textContent = `${entry.scope ? 'This page' : 'Shared update'} · ${date.toLocaleTimeString()}`;
-      $('time').dateTime = entry.updated;
+    const updates = matchingUpdates();
+    const container = $('.update');
+    if (!updates.length) {
+      container.textContent = connected ? 'No assistant update for this page yet.' : 'Local feed offline. Start overlay_server.py.';
     } else {
-      $('time').textContent = '';
+      container.replaceChildren(...updates.map(({ channel, entry }) => {
+        const row = document.createElement('div');
+        row.className = 'agent-update';
+        const label = document.createElement('small');
+        label.className = 'agent-label';
+        label.textContent = `${channel.agent} · ${channel.session}`;
+        const message = document.createElement('p');
+        message.textContent = entry.message;
+        row.append(label, message);
+        if (entry.updated) {
+          const time = document.createElement('time');
+          time.textContent = `Updated ${new Date(entry.updated).toLocaleTimeString()}`;
+          time.dateTime = entry.updated;
+          row.append(time);
+        }
+        return row;
+      }));
     }
+    $('.connection').hidden = connected || !updates.length;
     $('.connection').textContent = connected ? 'Local feed connected · updates every 3 seconds' : 'Feed offline · last update may be stale';
     applyPrefs();
   }
@@ -138,7 +190,8 @@
         try {
           if (response.status !== 200) throw new Error('Feed unavailable');
           const parsed = JSON.parse(response.responseText);
-          if (!parsed || typeof parsed.pages !== 'object' || parsed.pages === null) throw new Error('Invalid feed');
+          if (parsed?.version !== 2 || !parsed.channels || typeof parsed.channels !== 'object'
+            || Array.isArray(parsed.channels)) throw new Error('Invalid feed');
           cache = parsed; connected = true; lastSuccess = Date.now();
         } catch (_) { connected = false; }
         pending = false; paintUpdate();
@@ -153,7 +206,10 @@
     if (target?.closest('a')) $('.activity').textContent = 'Link clicked';
     else if (target?.closest('button,[role="button"]')) $('.activity').textContent = 'Button clicked';
   }, true);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { paintPage(); poll(); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) closeOptions();
+    else { paintPage(); poll(); }
+  });
   paintPage(); poll();
   setInterval(() => {
     if (!host.isConnected) document.documentElement.append(host);
