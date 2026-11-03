@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI - browser activity
 // @namespace    local.ai-harness.browser-activity
-// @version      1.3.1
+// @version      1.4.0
 // @description  Shows local assistant updates and page activity without sending page content anywhere.
 // @match        https://*/*
 // @match        http://*/*
@@ -34,7 +34,8 @@
   root.innerHTML = `<style>
     :host{color-scheme:light}*{box-sizing:border-box}
     section{width:min(330px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;background:#132b28;color:#edf6f2;border:1px solid #42655d;border-radius:14px;box-shadow:0 8px 32px #0004;font:13px/1.5 system-ui;text-align:left}
-    header{position:sticky;top:0;z-index:1;background:#132b28;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #42655d}
+    header{position:sticky;top:0;z-index:1;background:#132b28;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #42655d;cursor:grab;touch-action:none;user-select:none}
+    header.dragging{cursor:grabbing}
     strong{flex:1;font-size:13px}button,select{color:inherit;background:#132b28;border:1px solid #66877f;border-radius:6px;padding:2px 8px;cursor:pointer;font:inherit}
     .body{padding:12px}.label{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#b1cbc2;margin-top:10px}.label:first-child{margin-top:0}
     p{margin:3px 0;overflow-wrap:anywhere;white-space:pre-wrap}small{font-size:11px;color:#b1cbc2}
@@ -56,10 +57,53 @@
   <label><input class="only-updated" type="checkbox"> Only show pages with an assistant update</label>
   <button class="hide-site" type="button">Hide on this site</button>
   <small>Restore using Violentmonkey's “Show overlay on this site” menu command.</small>
-  <small>v1.3.1 · local feed only</small></div></div></section>`;
+  <small>Drag the header to move. Choose a corner to reset placement.</small>
+  <small>v1.4.0 · local feed only</small></div></div></section>`;
   document.documentElement.append(host);
   const $ = selector => root.querySelector(selector);
   const section = $('section');
+  const header = $('header');
+  header.title = 'Drag to move overlay';
+  let drag = null;
+  function placeOverlay() {
+    if (!Number.isFinite(prefs.position?.x) || !Number.isFinite(prefs.position?.y)) return;
+    const bounds = host.getBoundingClientRect();
+    const x = Math.max(0, Math.min(prefs.position.x, window.innerWidth - bounds.width));
+    const y = Math.max(0, Math.min(prefs.position.y, window.innerHeight - bounds.height));
+    host.style.left = x + 'px';
+    host.style.top = y + 'px';
+    host.style.right = host.style.bottom = 'auto';
+  }
+  header.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary || event.target.closest('button')) return;
+    const bounds = host.getBoundingClientRect();
+    drag = { id: event.pointerId, x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    header.setPointerCapture(event.pointerId);
+    header.classList.toggle('dragging', true);
+    event.preventDefault();
+  });
+  header.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.id) return;
+    prefs.position = { x: event.clientX - drag.x, y: event.clientY - drag.y };
+    placeOverlay();
+  });
+  function finishDrag(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    const id = drag.id;
+    drag = null;
+    header.classList.remove('dragging');
+    if (header.hasPointerCapture(id)) header.releasePointerCapture(id);
+    if (prefs.position) {
+      const bounds = host.getBoundingClientRect();
+      prefs.position = { x: bounds.left, y: bounds.top };
+      GM_setValue('preferences', prefs);
+    }
+  }
+  for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    header.addEventListener(event, finishDrag);
+  }
+  window.addEventListener('resize', placeOverlay);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(placeOverlay).observe(host);
   const toggle = $('.fold-toggle');
   toggle.addEventListener('click', () => {
     closeOptions();
@@ -86,6 +130,7 @@
     $('.show-activity').checked = prefs.activity;
     $('.only-updated').checked = prefs.onlyUpdated;
     host.style.display = siteHidden || (prefs.onlyUpdated && !matchingUpdates().length) ? 'none' : 'block';
+    placeOverlay();
   }
   let optionsTimer;
   function closeOptions() {
@@ -121,6 +166,7 @@
   ]) {
     $(selector).addEventListener('change', event => {
       prefs[property] = checkbox ? event.target.checked : event.target.value;
+      if (property === 'corner') delete prefs.position;
       GM_setValue('preferences', prefs); applyPrefs();
     });
   }
@@ -213,7 +259,7 @@
   paintPage(); poll();
   setInterval(() => {
     if (!host.isConnected) document.documentElement.append(host);
-    prefs = { ...defaults, ...GM_getValue('preferences', {}) };
+    if (!drag) prefs = { ...defaults, ...GM_getValue('preferences', {}) };
     siteHidden = GM_getValue('hidden:' + location.origin, false);
     paintPage();
     applyPrefs();

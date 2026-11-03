@@ -43,6 +43,9 @@ function harness(preferences = {}, assistantLayout = true) {
       }
     }
     setAttribute(name, value) { this.attrs[name] = value; }
+    setPointerCapture(id) { this.pointer = id; }
+    hasPointerCapture(id) { return this.pointer === id; }
+    releasePointerCapture() { this.pointer = null; }
     closest() { return null; }
   }
   const elements = [];
@@ -50,7 +53,7 @@ function harness(preferences = {}, assistantLayout = true) {
   Object.defineProperty(root, 'innerHTML', {
     set(html) {
       // Only tag, class, and hidden state are needed for these regressions.
-      for (const match of html.matchAll(/<(section|button|div|input|select|p|small|time)\b([^>]*)>/g)) {
+      for (const match of html.matchAll(/<(section|header|button|div|input|select|p|small|time)\b([^>]*)>/g)) {
         const classes = /class="([^"]*)"/.exec(match[2]);
         const element = new Element(match[1], classes ? classes[1].split(' ') : []);
         element.hidden = /\bhidden\b/.test(match[2]);
@@ -63,6 +66,14 @@ function harness(preferences = {}, assistantLayout = true) {
   root.querySelector = selector => elements.flatMap(descendants).find(element => selector.startsWith('.')
     ? element.classes.has(selector.slice(1)) : element.tag === selector);
   const host = new Element();
+  const window = new Element();
+  window.innerWidth = 1000;
+  window.innerHeight = 800;
+  host.getBoundingClientRect = () => ({
+    left: host.style.left !== 'auto' ? parseFloat(host.style.left) : window.innerWidth - 346,
+    top: host.style.top !== 'auto' ? parseFloat(host.style.top) : window.innerHeight - 216,
+    width: 330, height: 200,
+  });
   host.attachShadow = () => root;
   const document = new Element();
   document.title = 'Overlay regression test';
@@ -80,7 +91,7 @@ function harness(preferences = {}, assistantLayout = true) {
   let interval;
   const location = { origin: 'https://example.org', pathname: '/', host: 'example.org' };
   vm.runInNewContext(source, {
-    document, Element, Date,
+    document, window, Element, Date,
     location,
     GM_getValue: (name, fallback) => storage.get(name) ?? fallback,
     GM_setValue: (name, value) => storage.set(name, structuredClone(value)),
@@ -90,7 +101,7 @@ function harness(preferences = {}, assistantLayout = true) {
     setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
     clearTimeout: id => timers.delete(id),
   });
-  return { document, root, host, timers, requests, storage, location,
+  return { document, window, root, host, timers, requests, storage, location,
     tick: () => interval(),
     respond: channels => requests.at(-1).onload({ status: 200,
       responseText: JSON.stringify({ version: 2, channels }) }),
@@ -256,4 +267,75 @@ test('Agent/session labels and messages render as literal text', () => {
   assert.deepEqual(row.children.map(node => node.tag), ['small', 'p', 'time']);
   assert.equal(row.children[0].textContent, '<img src=x> · <b>session</b>');
   assert.equal(row.children[1].textContent, '<script>unsafe()</script>');
+});
+
+function pointer(h, name, x, y, extra = {}) {
+  h.$('header').fire(name, { button: 0, isPrimary: true, pointerId: 1,
+    clientX: x, clientY: y, preventDefault() {}, ...extra });
+}
+
+test('Dragging header persists placement across polling and reloads', () => {
+  const h = harness();
+  pointer(h, 'pointerdown', 674, 594);
+  pointer(h, 'pointermove', 220, 160);
+  assert.equal(h.host.style.left, '200px');
+  assert.equal(h.host.style.top, '150px');
+  assert.equal(h.host.style.right, 'auto');
+  h.tick();
+  assert.equal(h.host.style.left, '200px');
+  pointer(h, 'pointerup', 220, 160);
+  assert.deepEqual(h.storage.get('preferences').position, { x: 200, y: 150 });
+  assert.equal(h.$('header').hasPointerCapture(1), false);
+  const reload = harness(h.storage.get('preferences'));
+  assert.equal(reload.host.style.left, '200px');
+  assert.equal(reload.host.style.top, '150px');
+});
+
+test('Dragging clamps to viewport, handles cancellation, and reclamps on resize', () => {
+  const h = harness();
+  pointer(h, 'pointerdown', 674, 594);
+  pointer(h, 'pointermove', -100, -100);
+  assert.equal(h.host.style.left, '0px');
+  assert.equal(h.host.style.top, '0px');
+  pointer(h, 'pointermove', 2000, 2000);
+  assert.equal(h.host.style.left, '670px');
+  assert.equal(h.host.style.top, '600px');
+  pointer(h, 'pointercancel', 2000, 2000);
+  assert.deepEqual(h.storage.get('preferences').position, { x: 670, y: 600 });
+  h.window.innerWidth = 600;
+  h.window.innerHeight = 400;
+  h.window.fire('resize');
+  assert.equal(h.host.style.left, '270px');
+  assert.equal(h.host.style.top, '200px');
+  pointer(h, 'pointermove', 50, 50);
+  assert.equal(h.host.style.left, '270px');
+});
+
+test('Header controls, secondary buttons, and unrelated pointers do not drag', () => {
+  const h = harness();
+  pointer(h, 'pointerdown', 674, 594, { target: { closest: () => h.$('.settings-toggle') } });
+  pointer(h, 'pointermove', 200, 100);
+  assert.equal(h.host.style.left, 'auto');
+  pointer(h, 'pointerdown', 674, 594, { button: 2 });
+  pointer(h, 'pointermove', 200, 100);
+  assert.equal(h.host.style.left, 'auto');
+  pointer(h, 'pointerdown', 674, 594);
+  pointer(h, 'pointermove', 200, 100, { pointerId: 2 });
+  assert.equal(h.host.style.left, 'auto');
+  pointer(h, 'lostpointercapture', 674, 594);
+  pointer(h, 'pointermove', 200, 100);
+  assert.equal(h.host.style.left, 'auto');
+});
+
+test('Choosing a corner clears saved dragged placement', () => {
+  const h = harness({ position: { x: 200, y: 150 } });
+  h.$('.corner').value = 'top-left';
+  h.$('.corner').fire('change');
+  assert.equal(h.storage.get('preferences').position, undefined);
+  assert.equal(h.host.style.left, '16px');
+  assert.equal(h.host.style.top, '16px');
+  assert.equal(h.host.style.right, 'auto');
+  const invalid = harness({ position: { x: 'invalid', y: null } });
+  assert.equal(invalid.host.style.right, '16px');
+  assert.equal(invalid.host.style.bottom, '16px');
 });
