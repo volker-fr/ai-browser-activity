@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI - browser activity
 // @namespace    local.ai-harness.browser-activity
-// @version      1.4.0
+// @version      1.5.0
 // @description  Shows local assistant updates and page activity without sending page content anywhere.
 // @match        https://*/*
 // @match        http://*/*
@@ -19,6 +19,23 @@
 (function () {
   'use strict';
   const feed = 'http://127.0.0.1:17391/status';
+  // Activation is intentionally document-local, never shared between tabs.
+  let target = null;
+  function activateFromHash() {
+   if (location.hash.startsWith('#ai-activity=')) {
+    try {
+      const activation = JSON.parse(decodeURIComponent(location.hash.slice(13)));
+      if (typeof activation.agent === 'string' && activation.agent.trim()
+          && typeof activation.session === 'string' && activation.session.trim()
+          && typeof activation.hash === 'string'
+          && (!activation.hash || activation.hash.startsWith('#'))) {
+        history.replaceState(history.state, '', location.origin + location.pathname + location.search + activation.hash);
+        target = { agent: activation.agent.trim(), session: activation.session.trim() };
+      }
+    } catch (_) { /* Ignore invalid markers. */ }
+   }
+  }
+  activateFromHash();
   const defaults = { corner: 'bottom-right', compact: true, activity: false, onlyUpdated: false };
   let prefs = { ...defaults, ...GM_getValue('preferences', {}) };
   // Apply the assistant-focused layout once; later user choices remain persistent.
@@ -29,9 +46,9 @@
   }
   let siteHidden = GM_getValue('hidden:' + location.origin, false);
   const host = document.createElement('div');
-  host.style.cssText = 'all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;display:block';
+  host.style.cssText = 'all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;display:none';
   const root = host.attachShadow({ mode: 'closed' });
-  root.innerHTML = `<style>
+  const overlayCss = `
     :host{color-scheme:light}*{box-sizing:border-box}
     section{width:min(330px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;background:#132b28;color:#edf6f2;border:1px solid #42655d;border-radius:14px;box-shadow:0 8px 32px #0004;font:13px/1.5 system-ui;text-align:left}
     header{position:sticky;top:0;z-index:1;background:#132b28;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #42655d;cursor:grab;touch-action:none;user-select:none}
@@ -44,7 +61,8 @@
     label{display:block;margin:8px 0}select{max-width:100%}input{vertical-align:middle}.options small{display:block}
     .agent-update + .agent-update{margin-top:12px;padding-top:10px;border-top:1px solid #42655d}.agent-label{display:block;color:#b1cbc2;overflow-wrap:anywhere}
     a{color:#baf3dc}time{display:block;font-size:11px;color:#b1cbc2}
-  </style><section aria-label="AI browser activity overlay"><header><strong>AI - browser activity</strong><button class="settings-toggle" type="button" aria-label="Overlay options" aria-expanded="false">Options</button><button class="fold-toggle" type="button" aria-label="Minimize overlay">−</button></header>
+  `;
+  root.innerHTML = `<section aria-label="AI browser activity overlay"><header><strong>AI - browser activity</strong><button class="settings-toggle" type="button" aria-label="Overlay options" aria-expanded="false">Options</button><button class="fold-toggle" type="button" aria-label="Minimize overlay">−</button></header>
   <div class="body"><div class="update">Connecting to local feed…</div>
   <div class="details"><div class="label">This page</div><p class="page"></p><small class="address"></small>
   <div class="activity-block"><div class="label">Page activity</div><p class="activity">Page opened</p></div>
@@ -54,11 +72,25 @@
   <label>Position <select class="corner"><option value="bottom-right">Bottom right</option><option value="bottom-left">Bottom left</option><option value="top-right">Top right</option><option value="top-left">Top left</option></select></label>
   <label><input class="compact-option" type="checkbox"> Compact view</label>
   <label><input class="show-activity" type="checkbox"> Show page activity</label>
-  <label><input class="only-updated" type="checkbox"> Only show pages with an assistant update</label>
   <button class="hide-site" type="button">Hide on this site</button>
   <small>Restore using Violentmonkey's “Show overlay on this site” menu command.</small>
   <small>Drag the header to move. Choose a corner to reset placement.</small>
-  <small>v1.4.0 · local feed only</small></div></div></section>`;
+  <small>v1.5.0 · local feed only</small></div></div></section>`;
+  if (typeof CSSStyleSheet !== 'undefined' && 'adoptedStyleSheets' in root) {
+    try {
+      const stylesheet = new CSSStyleSheet();
+      stylesheet.replaceSync(overlayCss);
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, stylesheet];
+    } catch (_) {
+      const style = document.createElement('style');
+      style.textContent = overlayCss;
+      root.append(style);
+    }
+  } else {
+    const style = document.createElement('style');
+    style.textContent = overlayCss;
+    root.append(style);
+  }
   document.documentElement.append(host);
   const $ = selector => root.querySelector(selector);
   const section = $('section');
@@ -128,8 +160,7 @@
     $('.corner').value = prefs.corner;
     $('.compact-option').checked = prefs.compact;
     $('.show-activity').checked = prefs.activity;
-    $('.only-updated').checked = prefs.onlyUpdated;
-    host.style.display = siteHidden || (prefs.onlyUpdated && !matchingUpdates().length) ? 'none' : 'block';
+    host.style.display = !target || siteHidden ? 'none' : 'block';
     placeOverlay();
   }
   let optionsTimer;
@@ -162,7 +193,7 @@
   });
   for (const [selector, property, checkbox] of [
     ['.corner', 'corner', false], ['.compact-option', 'compact', true],
-    ['.show-activity', 'activity', true], ['.only-updated', 'onlyUpdated', true]
+    ['.show-activity', 'activity', true]
   ]) {
     $(selector).addEventListener('change', event => {
       prefs[property] = checkbox ? event.target.checked : event.target.value;
@@ -173,6 +204,16 @@
   $('.hide-site').addEventListener('click', () => {
     siteHidden = true; GM_setValue('hidden:' + location.origin, true); applyPrefs();
   });
+  GM_registerMenuCommand('Activate activity on this page', () => {
+    const agent = prompt('Agent name for this page:');
+    if (!agent || !agent.trim()) return;
+    const session = prompt('Session ID for this page:');
+    if (!session || !session.trim()) return;
+    target = { agent: agent.trim(), session: session.trim() };
+    paintUpdate(); poll();
+  });
+  GM_registerMenuCommand('Stop activity on this page', () => { target = null; paintUpdate(); });
+  window.addEventListener('hashchange', () => { activateFromHash(); paintUpdate(); });
   GM_registerMenuCommand('Show overlay on this site', () => {
     siteHidden = false; GM_setValue('hidden:' + location.origin, false);
     prefs.onlyUpdated = false; GM_setValue('preferences', prefs); applyPrefs();
@@ -194,7 +235,7 @@
   function matchingUpdates() {
     return Object.values(cache?.channels || {}).flatMap(channel => {
       const entry = channel?.pages?.[key] || channel?.global;
-      return typeof channel?.agent === 'string' && typeof channel?.session === 'string'
+      return target && channel?.agent === target.agent && channel?.session === target.session
         && typeof entry?.message === 'string' ? [{ channel, entry }] : [];
     }).sort((a, b) => a.channel.agent.localeCompare(b.channel.agent)
       || a.channel.session.localeCompare(b.channel.session));

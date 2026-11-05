@@ -8,7 +8,7 @@ const source = readFileSync(process.env.OVERLAY_SOURCE ||
   path.join(__dirname, '..', 'ai-overlay.user.js'), 'utf8');
 
 // Run the userscript with isolated GM storage, events, and deterministic timers.
-function harness(preferences = {}, assistantLayout = true) {
+function harness(preferences = {}, assistantLayout = true, stylesheetSupport = 'supported', activation = { agent: 'Agent', session: 'chat-a', hash: '' }) {
   class Element {
     constructor(tag = 'div', classes = []) {
       this.tag = tag;
@@ -50,8 +50,12 @@ function harness(preferences = {}, assistantLayout = true) {
   }
   const elements = [];
   const root = new Element();
+  if (stylesheetSupport !== 'unsupported') {
+    root.adoptedStyleSheets = [];
+  }
   Object.defineProperty(root, 'innerHTML', {
     set(html) {
+      root.children = [];
       // Only tag, class, and hidden state are needed for these regressions.
       for (const match of html.matchAll(/<(section|header|button|div|input|select|p|small|time)\b([^>]*)>/g)) {
         const classes = /class="([^"]*)"/.exec(match[2]);
@@ -89,19 +93,29 @@ function harness(preferences = {}, assistantLayout = true) {
   const requests = [];
   let timerId = 0;
   let interval;
-  const location = { origin: 'https://example.org', pathname: '/', host: 'example.org' };
+  const marker = value => '#ai-activity=' + encodeURIComponent(JSON.stringify(value));
+  const location = { origin: 'https://example.org', pathname: '/', host: 'example.org', search: '', hash: activation ? marker(activation) : '' };
+  const history = { state: null, replaceState(_state, _title, url) { location.hash = url.includes('#') ? url.slice(url.indexOf('#')) : ''; } };
+  const menus = new Map();
+  class CSSStyleSheet {
+    replaceSync(css) {
+      if (stylesheetSupport === 'throws') throw new Error('constructed sheets unavailable');
+      this.cssText = css;
+    }
+  }
   vm.runInNewContext(source, {
     document, window, Element, Date,
-    location,
+    CSSStyleSheet: stylesheetSupport === 'unsupported' ? undefined : CSSStyleSheet,
+    location, history, prompt: () => null,
     GM_getValue: (name, fallback) => storage.get(name) ?? fallback,
     GM_setValue: (name, value) => storage.set(name, structuredClone(value)),
-    GM_registerMenuCommand() {},
+    GM_registerMenuCommand: (name, fn) => menus.set(name, fn),
     GM_xmlhttpRequest: request => requests.push(request),
     setInterval: fn => { interval = fn; },
     setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
     clearTimeout: id => timers.delete(id),
   });
-  return { document, window, root, host, timers, requests, storage, location,
+  return { document, window, root, host, timers, requests, storage, location, history, menus, marker,
     tick: () => interval(),
     respond: channels => requests.at(-1).onload({ status: 200,
       responseText: JSON.stringify({ version: 2, channels }) }),
@@ -168,6 +182,21 @@ test('Default visibility includes pages without updates; offline guidance names 
   assert.match(h.$('.update').textContent, /Start overlay_server\.py\./);
 });
 
+test('Overlay CSS uses a constructed stylesheet before page CSP can block it', () => {
+  const h = harness();
+  assert.equal(h.root.adoptedStyleSheets.length, 1);
+  assert.match(h.root.adoptedStyleSheets[0].cssText, /section\{width:min\(330px/);
+  assert.equal(h.root.children.length, 0);
+});
+
+test('Overlay CSS falls back to a shadow style element when constructed sheets are unavailable', () => {
+  for (const support of ['unsupported', 'throws']) {
+    const h = harness({}, true, support);
+    assert.equal(h.root.children[0].tag, 'style');
+    assert.match(h.root.children[0].textContent, /section\{width:min\(330px/);
+  }
+});
+
 
 test('Default layout uses bottom-right and hides page details and generic activity', () => {
   const h = harness();
@@ -212,56 +241,55 @@ const entry = message => ({ message, scope: 'https://example.org/', updated: '20
 const channel = (agent, session, message) => ({ agent, session, global: null,
   pages: { 'https://example.org/': entry(message) } });
 
-test('Every agent/session renders its own labelled latest update on the same page', () => {
-  const h = harness();
-  const channels = { a: channel('Agent A', 'chat-a', 'First action'),
-    b: channel('Agent A', 'chat-b', 'Second action'),
-    c: channel('Agent B', 'chat-a', 'Third action') };
-  h.respond(channels);
-  let rows = h.$('.update').children;
-  assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map(row => row.children[0].textContent),
-    ['Agent A · chat-a', 'Agent A · chat-b', 'Agent B · chat-a']);
-  assert.deepEqual(rows.map(row => row.children[1].textContent),
-    ['First action', 'Second action', 'Third action']);
-  channels.a.pages['https://example.org/'] = entry('New action');
-  h.tick();
-  h.respond(channels);
-  rows = h.$('.update').children;
-  assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map(row => row.children[1].textContent),
-    ['New action', 'Second action', 'Third action']);
+test('Only the explicitly activated document and session display updates', () => {
+  const used = harness();
+  const untouched = harness({}, true, 'supported', null);
+  const channels = { a: channel('Agent', 'chat-a', 'Selected'), b: channel('Agent', 'chat-b', 'Other') };
+  used.respond(channels); untouched.respond(channels);
+  assert.equal(used.host.style.display, 'block');
+  assert.equal(untouched.host.style.display, 'none');
+  assert.deepEqual(used.$('.update').children.map(row => row.children[1].textContent), ['Selected']);
+  untouched.location.hash = untouched.marker({ agent: 'Agent', session: 'chat-b', hash: '#original' });
+  untouched.window.fire('hashchange');
+  assert.equal(untouched.location.hash, '#original');
+  assert.equal(untouched.host.style.display, 'block');
+  assert.equal(untouched.$('.update').children[0].children[1].textContent, 'Other');
+  untouched.menus.get('Stop activity on this page')();
+  assert.equal(untouched.host.style.display, 'none');
+  assert.equal(harness({}, true, 'supported', null).host.style.display, 'none');
 });
 
-test('Page precedence and fallback selection apply independently to each session', () => {
-  const h = harness();
-  const a = channel('Agent', 'a', 'Specific A');
-  a.global = entry('Fallback A');
-  const b = { agent: 'Agent', session: 'b', global: entry('Fallback B'), pages: {} };
-  const unrelated = { agent: 'Other', session: 'c', global: null,
-    pages: { 'https://example.org/elsewhere': entry('Unrelated') } };
-  h.respond({ a, b, unrelated });
-  assert.deepEqual(h.$('.update').children.map(row => row.children[1].textContent),
-    ['Specific A', 'Fallback B']);
-  h.location.pathname = '/elsewhere';
-  h.tick();
-  assert.deepEqual(h.$('.update').children.map(row => row.children[1].textContent),
-    ['Fallback A', 'Fallback B', 'Unrelated']);
-});
-
-test('Update-only visibility includes any matching agent/session', () => {
-  const h = harness({ onlyUpdated: true });
+test('Invalid markers are ignored; activated overlay stays visible without updates and offline', () => {
+  const h = harness({}, true, 'supported', null);
+  h.location.hash = '#ai-activity=bad'; h.window.fire('hashchange');
   assert.equal(h.host.style.display, 'none');
-  h.respond({ a: channel('Agent', 'a', 'Visited page') });
+  h.location.hash = h.marker({ agent: 'Agent', session: 'chat-a', hash: '' });
+  h.window.fire('hashchange'); h.respond({});
   assert.equal(h.host.style.display, 'block');
-  h.tick();
-  h.respond({});
-  assert.equal(h.host.style.display, 'none');
-  assert.equal(h.$('.update').children.length, 0);
+  h.tick(); h.requests.at(-1).onerror();
+  assert.equal(h.host.style.display, 'block');
+});
+
+test('Restoration preserves same origin for double-slash paths and only activates on success', () => {
+  const h = harness({}, true, 'supported', null);
+  h.location.pathname = '//other/path';
+  h.location.search = '?q=1';
+  let restored;
+  h.history.replaceState = (_state, _title, url) => { restored = url; };
+  h.location.hash = h.marker({ agent: 'Agent', session: 'chat-a', hash: '#original' });
+  h.window.fire('hashchange');
+  assert.equal(restored, 'https://example.org//other/path?q=1#original');
+  assert.equal(h.host.style.display, 'block');
+
+  const failed = harness({}, true, 'supported', null);
+  failed.history.replaceState = () => { throw new Error('Cannot restore'); };
+  failed.location.hash = failed.marker({ agent: 'Agent', session: 'chat-a', hash: '' });
+  failed.window.fire('hashchange');
+  assert.equal(failed.host.style.display, 'none');
 });
 
 test('Agent/session labels and messages render as literal text', () => {
-  const h = harness();
+  const h = harness({}, true, 'supported', { agent: '<img src=x>', session: '<b>session</b>', hash: '' });
   h.respond({ a: channel('<img src=x>', '<b>session</b>', '<script>unsafe()</script>') });
   const row = h.$('.update').children[0];
   assert.deepEqual(row.children.map(node => node.tag), ['small', 'p', 'time']);
