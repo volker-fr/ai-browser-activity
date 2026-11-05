@@ -1,0 +1,7 @@
+[Unit]
+Description=AI browser activity feed (socket-activated)
+ConditionPathExists=@SERVER_CONDITION@
+
+[Service]
+Environment=AI_OVERLAY_IDLE_MINUTES=5
+ExecStart=:/usr/bin/python3 @SERVER@

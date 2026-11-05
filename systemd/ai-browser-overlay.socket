@@ -1,0 +1,11 @@
+[Unit]
+Description=AI browser activity feed socket
+ConditionPathExists=@SERVER_CONDITION@
+
+[Socket]
+LogLevelMax=debug
+ListenStream=127.0.0.1:17391
+Accept=no
+
+[Install]
+WantedBy=sockets.target

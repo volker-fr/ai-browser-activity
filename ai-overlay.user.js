@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         AI - browser activity
 // @namespace    local.ai-harness.browser-activity
-// @version      1.5.0
+// @version      1.5.5
+// @updateURL    http://127.0.0.1:17391/ai-overlay-http.user.js
+// @downloadURL  http://127.0.0.1:17391/ai-overlay-http.user.js
 // @description  Shows local assistant updates and page activity without sending page content anywhere.
 // @match        https://*/*
 // @match        http://*/*
-// @exclude      http://127.0.0.1:17391/*
-// @exclude      http://localhost:17391/*
 // @noframes
+// @grant        GM_info
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -18,6 +19,26 @@
 
 (function () {
   'use strict';
+  if (location.protocol === 'http:' && location.port === '17391'
+      && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+    if (location.pathname === '/') {
+      const status = document.getElementById('userscript-status');
+      const installed = typeof GM_info === 'undefined' ? null : GM_info?.script?.version;
+      const available = status?.dataset.sourceVersion;
+      const valid = value => typeof value === 'string' && /^\d+(?:\.\d+)*$/.test(value);
+      if (status && valid(installed) && valid(available)) {
+        const left = installed.split('.').map(Number), right = available.split('.').map(Number);
+        let comparison = 0;
+        for (let i = 0; i < Math.max(left.length, right.length); i++) {
+          comparison = (left[i] || 0) - (right[i] || 0);
+          if (comparison) break;
+        }
+        const message = comparison < 0 ? 'Update available' : comparison > 0 ? 'Newer than source' : 'Up to date';
+        status.textContent = `${message}: installed ${installed}, available ${available}.`;
+      }
+    }
+    return;
+  }
   const feed = 'http://127.0.0.1:17391/status';
   // Activation is intentionally document-local, never shared between tabs.
   let target = null;
@@ -69,13 +90,14 @@
   </div><small class="connection" hidden></small>
   <div class="options" hidden><small>Options apply to all sites and tabs.</small>
   <a href="http://127.0.0.1:17391/" target="_blank" rel="noopener noreferrer">Local update panel</a>
+  <a href="http://127.0.0.1:17391/ai-overlay-http.user.js" target="_blank" rel="noopener noreferrer">Install or update userscript via HTTP</a>
   <label>Position <select class="corner"><option value="bottom-right">Bottom right</option><option value="bottom-left">Bottom left</option><option value="top-right">Top right</option><option value="top-left">Top left</option></select></label>
   <label><input class="compact-option" type="checkbox"> Compact view</label>
   <label><input class="show-activity" type="checkbox"> Show page activity</label>
   <button class="hide-site" type="button">Hide on this site</button>
   <small>Restore using Violentmonkey's “Show overlay on this site” menu command.</small>
   <small>Drag the header to move. Choose a corner to reset placement.</small>
-  <small>v1.5.0 · local feed only</small></div></div></section>`;
+  <small>v1.5.5 · local feed only</small></div></div></section>`;
   if (typeof CSSStyleSheet !== 'undefined' && 'adoptedStyleSheets' in root) {
     try {
       const stylesheet = new CSSStyleSheet();
@@ -213,7 +235,7 @@
     paintUpdate(); poll();
   });
   GM_registerMenuCommand('Stop activity on this page', () => { target = null; paintUpdate(); });
-  window.addEventListener('hashchange', () => { activateFromHash(); paintUpdate(); });
+  window.addEventListener('hashchange', () => { activateFromHash(); paintUpdate(); poll(); });
   GM_registerMenuCommand('Show overlay on this site', () => {
     siteHidden = false; GM_setValue('hidden:' + location.origin, false);
     prefs.onlyUpdated = false; GM_setValue('preferences', prefs); applyPrefs();
@@ -269,7 +291,7 @@
     applyPrefs();
   }
   function poll() {
-    if (pending || document.hidden) return;
+    if (!target || pending || document.hidden) return;
     pending = true;
     GM_xmlhttpRequest({
       method: 'GET', url: feed, timeout: 2500, anonymous: true,

@@ -123,6 +123,28 @@ function harness(preferences = {}, assistantLayout = true, stylesheetSupport = '
     open: () => root.querySelector('.settings-toggle').fire('click') };
 }
 
+
+test('Feed panel detects version per document and never creates overlay or polls', () => {
+  for (const hostname of ['localhost', '127.0.0.1']) {
+    for (const [installed, expected] of [['1.5.4', 'Up to date'], ['1.5.3', 'Update available'],
+      ['1.6.0', 'Newer than source'], ['1.5.4.0', 'Up to date'], ['bad', 'not detected']]) {
+      const status = { dataset: { sourceVersion: '1.5.4' }, textContent: 'not detected' };
+      let requested = 0;
+      vm.runInNewContext(source, {
+        location: { protocol: 'http:', port: '17391', hostname, pathname: '/' },
+        document: { getElementById: () => status }, GM_info: { script: { version: installed } },
+        GM_xmlhttpRequest: () => { requested++; },
+      });
+      assert.match(status.textContent, new RegExp(expected));
+      assert.equal(requested, 0);
+    }
+    vm.runInNewContext(source, {
+      location: { protocol: 'http:', port: '17391', hostname, pathname: '/status' },
+      document: { getElementById: () => { throw new Error('must not touch non-panel'); } },
+    });
+  }
+});
+
 test('Options starts hidden and closes on outside pointer or Escape', () => {
   const h = harness();
   assert.equal(h.$('.options').hidden, true);
@@ -245,7 +267,8 @@ test('Only the explicitly activated document and session display updates', () =>
   const used = harness();
   const untouched = harness({}, true, 'supported', null);
   const channels = { a: channel('Agent', 'chat-a', 'Selected'), b: channel('Agent', 'chat-b', 'Other') };
-  used.respond(channels); untouched.respond(channels);
+  used.respond(channels);
+  assert.equal(untouched.requests.length, 0);
   assert.equal(used.host.style.display, 'block');
   assert.equal(untouched.host.style.display, 'none');
   assert.deepEqual(used.$('.update').children.map(row => row.children[1].textContent), ['Selected']);
@@ -253,10 +276,35 @@ test('Only the explicitly activated document and session display updates', () =>
   untouched.window.fire('hashchange');
   assert.equal(untouched.location.hash, '#original');
   assert.equal(untouched.host.style.display, 'block');
+  assert.equal(untouched.requests.length, 1);
+  untouched.respond(channels);
   assert.equal(untouched.$('.update').children[0].children[1].textContent, 'Other');
   untouched.menus.get('Stop activity on this page')();
   assert.equal(untouched.host.style.display, 'none');
+  untouched.tick();
+  assert.equal(untouched.requests.length, 1);
   assert.equal(harness({}, true, 'supported', null).host.style.display, 'none');
+});
+
+test('All five same-URL tabs activated for one session display its published update', () => {
+  const tabs = Array.from({ length: 5 }, () => harness());
+  const otherSession = harness({}, true, 'supported', { agent: 'Agent', session: 'chat-b', hash: '' });
+  const unactivated = harness({}, true, 'supported', null);
+  const channels = { a: channel('Agent', 'chat-a', 'Published from one tab'),
+    b: channel('Agent', 'chat-b', 'Different session') };
+
+  for (const tab of tabs) tab.respond(channels);
+  otherSession.respond(channels);
+
+  for (const tab of tabs) {
+    assert.equal(tab.location.origin + tab.location.pathname, 'https://example.org/');
+    assert.equal(tab.host.style.display, 'block');
+    assert.equal(tab.$('.update').children[0].children[1].textContent, 'Published from one tab');
+  }
+  assert.equal(otherSession.host.style.display, 'block');
+  assert.equal(otherSession.$('.update').children[0].children[1].textContent, 'Different session');
+  assert.equal(unactivated.requests.length, 0);
+  assert.equal(unactivated.host.style.display, 'none');
 });
 
 test('Invalid markers are ignored; activated overlay stays visible without updates and offline', () => {
